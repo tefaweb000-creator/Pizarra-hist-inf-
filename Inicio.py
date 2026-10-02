@@ -1,143 +1,233 @@
-import os
-import streamlit as st
 import base64
-from openai import OpenAI
-import openai
-from PIL import Image, ImageOps
+import io
+import json
+
 import numpy as np
-import pandas as pd
+import streamlit as st
+from openai import OpenAI
+from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
-Expert=" "
-profile_imgenh=" "
+# ---------------- Configuración ----------------
+st.set_page_config(page_title="Pizarra Tutor", page_icon="✏️", layout="centered")
 
-# Inicializar session_state
-if 'analysis_done' not in st.session_state:
-    st.session_state.analysis_done = False
-if 'full_response' not in st.session_state:
-    st.session_state.full_response = ""
-if 'base64_image' not in st.session_state:
-    st.session_state.base64_image = ""
-    
-def encode_image_to_base64(image_path):
-    try:
-        with open(image_path, "rb") as image_file:
-            encoded_image = base64.b64encode(image_file.read()).decode("utf-8")
-            return encoded_image
-    except FileNotFoundError:
-        return "Error: La imagen no se encontró en la ruta especificada."
+PIZARRA = "#1E3B2F"
+PIZARRA_BORDE = "#5B4636"
+TIZA = "#F2F2EC"
+TIZA_AMARILLA = "#F4D35E"
+TIZA_AZUL = "#8EC5E8"
+TIZA_ROSA = "#F2A1B5"
 
-
-# Streamlit 
-st.set_page_config(page_title='Tablero Inteligente')
-st.title('Tablero Inteligente')
-with st.sidebar:
-    st.subheader("Acerca de:")
-    st.subheader("En esta aplicación veremos la capacidad que ahora tiene una máquina de interpretar un boceto")
-st.subheader("Dibuja el boceto en el panel y presiona el botón para analizarla")
-
-# Add canvas component
-drawing_mode = "freedraw"
-stroke_width = st.sidebar.slider('Selecciona el ancho de línea', 1, 30, 5)
-stroke_color = "#000000" 
-bg_color = '#FFFFFF'
-
-# Create a canvas component
-canvas_result = st_canvas(
-    fill_color="rgba(255, 165, 0, 0.3)",
-    stroke_width=stroke_width,
-    stroke_color=stroke_color,
-    background_color=bg_color,
-    height=300,
-    width=400,
-    drawing_mode=drawing_mode,
-    key="canvas",
+st.markdown(
+    f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Inter:wght@400;500;600&display=swap');
+    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
+    .stApp {{ background: #14211B; color: {TIZA}; }}
+    section[data-testid="stSidebar"] {{ background: #192A22; }}
+    .titulo {{
+        font-family: 'Caveat', cursive; font-size: 3.4rem; line-height: 1;
+        color: {TIZA}; margin: 0.2rem 0 0.2rem 0;
+        text-shadow: 0 0 1px rgba(242,242,236,.6), 1px 1px 0 rgba(242,242,236,.15);
+    }}
+    .subtitulo {{ color: #B9C7BE; font-size: 1rem; margin-bottom: 1.2rem; }}
+    .marco iframe {{ border-radius: 6px; }}
+    div[data-testid="stCanvas"], iframe[title="streamlit_drawable_canvas.st_canvas"] {{
+        border: 10px solid {PIZARRA_BORDE}; border-radius: 12px;
+        box-shadow: inset 0 0 30px rgba(0,0,0,.4);
+    }}
+    .stButton > button {{
+        border-radius: 10px; border: 1px solid {TIZA_AMARILLA};
+        background: transparent; color: {TIZA_AMARILLA}; font-weight: 600;
+        padding: 0.55rem 1.2rem;
+    }}
+    .stButton > button:hover {{ background: {TIZA_AMARILLA}; color: #14211B; }}
+    div[data-testid="stMetric"] {{
+        background: #1B3027; border-radius: 12px; padding: 0.7rem 0.9rem;
+    }}
+    .respuesta {{
+        background: {PIZARRA}; border-left: 4px solid {TIZA_AMARILLA};
+        border-radius: 10px; padding: 0.9rem 1.1rem; margin: 0.8rem 0;
+        font-size: 1.1rem;
+    }}
+    .transcripcion {{
+        font-family: 'Caveat', cursive; font-size: 1.6rem; color: {TIZA};
+        background: {PIZARRA}; border-radius: 10px; padding: 0.6rem 1rem;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-ke = st.text_input('Ingresa tu Clave', type="password")
-os.environ['OPENAI_API_KEY'] = ke
+# ---------------- Barra lateral ----------------
+with st.sidebar:
+    st.markdown("### 🔑 Clave")
+    api_key = st.text_input("OpenAI API Key", type="password")
 
-# Retrieve the OpenAI API Key
-api_key = os.environ['OPENAI_API_KEY']
+    st.markdown("### 📚 Clase")
+    materia = st.selectbox(
+        "Materia",
+        ["Matemáticas", "Física", "Química", "Finanzas / Contabilidad", "Estadística", "Otra"],
+    )
+    nivel = st.radio("Nivel de explicación", ["Básico", "Detallado"], horizontal=True)
 
-# Initialize the OpenAI client with the API key
-client = OpenAI(api_key=api_key)
+    st.markdown("### 🖍️ Tiza")
+    modo = st.radio("Herramienta", ["Tiza", "Borrador"], horizontal=True)
+    color_tiza = st.selectbox(
+        "Color",
+        ["Blanca", "Amarilla", "Azul", "Rosada"],
+        disabled=(modo == "Borrador"),
+    )
+    grosor = st.slider("Grosor", 1, 25, 4 if modo == "Tiza" else 20)
 
-analyze_button = st.button("Analiza la imagen", type="secondary")
+colores = {"Blanca": TIZA, "Amarilla": TIZA_AMARILLA, "Azul": TIZA_AZUL, "Rosada": TIZA_ROSA}
+trazo = PIZARRA if modo == "Borrador" else colores[color_tiza]
 
-# Check if an image has been uploaded, if the API key is available, and if the button has been pressed
-if canvas_result.image_data is not None and api_key and analyze_button:
+# ---------------- Estado ----------------
+if "lienzo_id" not in st.session_state:
+    st.session_state.lienzo_id = 0
+if "resultado" not in st.session_state:
+    st.session_state.resultado = None
 
-    with st.spinner("Analizando ..."):
-        # Encode the image
-        input_numpy_array = np.array(canvas_result.image_data)
-        input_image = Image.fromarray(input_numpy_array.astype('uint8')).convert('RGBA')
-        input_image.save('img.png')
-        
-        # Codificar la imagen en base64
-        base64_image = encode_image_to_base64("img.png")
-        st.session_state.base64_image = base64_image
-            
-        prompt_text = (f"Describe in spanish briefly the image")
-    
-        # Make the request to the OpenAI API
-        try:
-            full_response = ""
-            message_placeholder = st.empty()
-            response = openai.chat.completions.create(
-              model= "gpt-4o-mini",
-              messages=[
-                {
-                   "role": "user",
-                   "content": [
-                     {"type": "text", "text": prompt_text},
-                     {
-                       "type": "image_url",
-                       "image_url": {
-                         "url": f"data:image/png;base64,{base64_image}",
-                       },
-                     },
-                   ],
-                  }
+# ---------------- Encabezado ----------------
+st.markdown('<div class="titulo">Pizarra Tutor ✏️</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="subtitulo">Escribe tu ejercicio a mano y te lo explico paso a paso.</div>',
+    unsafe_allow_html=True,
+)
+
+# ---------------- Lienzo ----------------
+lienzo = st_canvas(
+    fill_color="rgba(0,0,0,0)",
+    stroke_width=grosor,
+    stroke_color=trazo,
+    background_color=PIZARRA,
+    height=380,
+    width=680,
+    drawing_mode="freedraw",
+    key=f"pizarra_{st.session_state.lienzo_id}",
+)
+
+col_a, col_b = st.columns(2)
+with col_a:
+    resolver = st.button("Resolver ejercicio", use_container_width=True)
+with col_b:
+    if st.button("Borrar pizarra", use_container_width=True):
+        st.session_state.lienzo_id += 1
+        st.session_state.resultado = None
+        st.rerun()
+
+
+# ---------------- Funciones ----------------
+def lienzo_a_base64(datos):
+    img = Image.fromarray(datos.astype("uint8"), "RGBA")
+    fondo = Image.new("RGBA", img.size, PIZARRA)
+    fondo.alpha_composite(img)
+    buffer = io.BytesIO()
+    fondo.convert("RGB").save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+def pizarra_vacia(resultado_lienzo):
+    if resultado_lienzo.json_data is None:
+        return True
+    return len(resultado_lienzo.json_data.get("objects", [])) == 0
+
+
+def pedir_tutor(clave, imagen_b64, materia, nivel):
+    cliente = OpenAI(api_key=clave)
+    detalle = (
+        "Explica cada paso en una sola frase corta."
+        if nivel == "Básico"
+        else "Explica cada paso con detalle, diciendo qué regla o propiedad usas y por qué."
+    )
+    instrucciones = f"""
+Eres un tutor universitario paciente de {materia}. En la imagen hay un ejercicio escrito a mano
+con tiza sobre una pizarra. {detalle}
+Usa LaTeX entre signos $ para las expresiones matemáticas.
+Responde SOLO con un JSON con estas claves:
+- "transcripcion": el ejercicio tal como lo lees, en texto.
+- "tema": el tema específico (por ejemplo "Derivadas por regla de la cadena").
+- "dificultad": "Fácil", "Media" o "Difícil".
+- "pasos": lista de strings, cada uno un paso de la solución.
+- "respuesta_final": la respuesta final.
+- "concepto": explicación del concepto clave en 2 o 3 frases.
+- "error_comun": un error típico que cometen los estudiantes en este tipo de ejercicio.
+- "practica": un ejercicio nuevo parecido, de dificultad similar.
+- "solucion_practica": la solución breve de ese ejercicio de práctica.
+Si no hay un ejercicio legible, pon "transcripcion": "" y explica en "concepto" qué debe escribir el estudiante.
+"""
+    respuesta = cliente.chat.completions.create(
+        model="gpt-4o-mini",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instrucciones},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{imagen_b64}"},
+                    },
                 ],
-              max_tokens=500,
-              )
-            
-            if response.choices[0].message.content is not None:
-                    full_response += response.choices[0].message.content
-                    message_placeholder.markdown(full_response + "▌")
-            
-            # Final update to placeholder after the stream ends
-            message_placeholder.markdown(full_response)
-            
-            # Guardar en session_state
-            st.session_state.full_response = full_response
-            st.session_state.analysis_done = True
-            
-            if Expert== profile_imgenh:
-               st.session_state.mi_respuesta= response.choices[0].message.content
-    
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
+            }
+        ],
+        max_tokens=1500,
+    )
+    return json.loads(respuesta.choices[0].message.content)
 
-# Mostrar la funcionalidad de crear historia si ya se hizo el análisis
-if st.session_state.analysis_done:
-    st.divider()
-    st.subheader("📚 ¿Quieres crear una historia?")
-    
-    if st.button("✨ Crear historia infantil"):
-        with st.spinner("Creando historia..."):
-            story_prompt = f"Basándote en esta descripción: '{st.session_state.full_response}', crea una historia infantil breve y entretenida. La historia debe ser creativa y apropiada para niños."
-            
-            story_response = openai.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": story_prompt}],
-                max_tokens=500,
-            )
-            
-            st.markdown("**📖 Tu historia:**")
-            st.write(story_response.choices[0].message.content)
 
-# Warnings for user action required
-if not api_key:
-    st.warning("Por favor ingresa tu API key.")
+# ---------------- Acción ----------------
+if resolver:
+    if not api_key:
+        st.warning("Escribe tu OpenAI API Key en la barra lateral para resolver el ejercicio.")
+    elif lienzo.image_data is None or pizarra_vacia(lienzo):
+        st.info("La pizarra está vacía. Escribe un ejercicio y vuelve a presionar Resolver.")
+    else:
+        with st.spinner("Leyendo tu pizarra..."):
+            try:
+                imagen = lienzo_a_base64(lienzo.image_data)
+                st.session_state.resultado = pedir_tutor(api_key, imagen, materia, nivel)
+                st.session_state.celebrar = True
+            except Exception as e:
+                st.session_state.resultado = None
+                st.error(f"No se pudo resolver el ejercicio. Revisa tu API Key. Detalle: {e}")
+
+# ---------------- Resultados ----------------
+r = st.session_state.resultado
+if r:
+    if not r.get("transcripcion"):
+        st.info(r.get("concepto", "No logré leer un ejercicio. Escribe más grande y claro."))
+    else:
+        st.markdown("#### Esto fue lo que leí")
+        st.markdown(f'<div class="transcripcion">{r["transcripcion"]}</div>', unsafe_allow_html=True)
+        st.caption("Si leí algo mal, corrígelo en la pizarra y vuelve a resolver.")
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Materia", materia)
+        m2.metric("Pasos", len(r.get("pasos", [])))
+        m3.metric("Dificultad", r.get("dificultad", "—"))
+        st.caption(f"Tema: {r.get('tema', '')}")
+
+        tab1, tab2, tab3 = st.tabs(["Solución", "Concepto", "Practica"])
+
+        with tab1:
+            for i, paso in enumerate(r.get("pasos", []), start=1):
+                st.markdown(f"**Paso {i}.** {paso}")
+            st.markdown("**Respuesta final**")
+            st.markdown(r.get("respuesta_final", ""))
+
+        with tab2:
+            st.markdown(r.get("concepto", ""))
+            if r.get("error_comun"):
+                st.warning(f"Error común: {r['error_comun']}")
+
+        with tab3:
+            st.markdown("Intenta este ejercicio en la pizarra antes de ver la solución:")
+            st.markdown(f"> {r.get('practica', '')}")
+            with st.expander("Ver solución"):
+                st.markdown(r.get("solucion_practica", ""))
+
+    if st.session_state.get("celebrar"):
+        st.balloons()
+        st.session_state.celebrar = False
